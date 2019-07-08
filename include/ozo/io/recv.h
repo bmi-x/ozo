@@ -59,7 +59,7 @@ constexpr decltype(auto) member_value(Adt&& v, const Index&) {
  * To deserialize complex types like #Array or #Composite special
  * internal implementations are used.
  *
- * @note This functor requires type definition via #OZO_PG_DEFINE_TYPE_AND_ARRAY or
+ * @note This functor requires type definition via #OZO_PG_BIND_TYPE or
  * #OZO_PG_DEFINE_CUSTOM_TYPE.
  *
  * ### Customization point
@@ -76,24 +76,6 @@ template <typename Out, typename = std::void_t<>>
 struct recv_impl {
     static_assert(HasDefinition<Out>, "type Out must be defined as PostgreSQL type");
 
-    static_assert(
-        Writable<Out&> || !Readable<Out&>,
-        "Out type object can't be received. Probably it is read only type"
-        " or it is an adapted struct with read only field."
-    );
-
-    static_assert(
-        Writable<Out&>,
-        "Out type object can't be received. Probably it is not an arithmetic"
-        " or doesn't have non const data and size methods "
-        " or it is a struct with field which can't be received."
-    );
-
-    static_assert(
-        !DynamicSize<Out&> || Resizable<Out&>,
-        "Out type object has dynamic size but doesn't have resize method."
-    );
-
     /**
      * @brief Implementation of deserialization object from a stream.
      *
@@ -105,14 +87,38 @@ struct recv_impl {
      */
     template <typename M>
     static istream& apply(istream& in, size_type size, const oid_map_t<M>&, Out& out) {
+        auto& real_out = [&] {
+            if constexpr (StrongTypedef<Out>) {
+                return std::ref(static_cast<typename Out::base_type&>(out));
+            } else {
+                return std::ref(static_cast<Out&>(out));
+            }
+        }().get();
+
+        static_assert(
+            Writable<decltype(real_out)> || !Readable<decltype(real_out)>,
+            "Out type object can't be received. Probably it is read only type"
+            " or it is an adapted struct with read only field."
+        );
+
+        static_assert(
+            Writable<decltype(real_out)>,
+            "Out type object can't be received. Probably it is not an arithmetic"
+            " or doesn't have non const data and size methods "
+            " or it is a struct with field which can't be received."
+        );
+
         if constexpr (DynamicSize<Out>) {
-            out.resize(size);
-        } else if (size != size_of(out)) {
+            static_assert(Resizable<decltype(real_out)>,
+                "Out type object has dynamic size but doesn't have resize method."
+            );
+            real_out.resize(size);
+        } else if (size != size_of(real_out)) {
             throw ozo::system_error(error::bad_object_size,
                 "data size " + std::to_string(size)
-                + " does not match type size " + std::to_string(size_of(out)));
+                + " does not match type size " + std::to_string(size_of(real_out)));
         }
-        return read(in, out);
+        return read(in, real_out);
     }
 };
 
@@ -121,14 +127,11 @@ namespace detail {
 template <typename T, typename = std::void_t<>>
 struct recv_impl_dispatcher { using type = recv_impl<std::decay_t<T>>; };
 
-template <typename T, typename Tag>
-struct recv_impl_dispatcher<strong_typedef_wrapper<T, Tag>> { using type = recv_impl<std::decay_t<T>>; };
-
 template <typename T>
 using get_recv_impl = typename recv_impl_dispatcher<unwrap_type<T>>::type;
 
 template <typename M, typename Oid, typename Out>
-inline istream& recv(istream& in, Oid oid, size_type size, const oid_map_t<M>& oids, Out& out) {
+inline istream& recv(istream& in, [[maybe_unused]] Oid oid, size_type size, const oid_map_t<M>& oids, Out& out) {
     static_assert(std::is_same_v<Oid, oid_t>||std::is_same_v<Oid, null_oid_t>,
         "oid must be oid_t or null_oid_t type");
 
@@ -146,8 +149,6 @@ inline istream& recv(istream& in, Oid oid, size_type size, const oid_map_t<M>& o
                 + boost::core::demangle(typeid(unwrap_type<Out>).name()));
         }
     }
-
-    (void)oid; // Dummy GCC
 
     if constexpr (Nullable<Out>) {
         init_nullable(out);

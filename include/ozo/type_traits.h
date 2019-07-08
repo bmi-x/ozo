@@ -1,6 +1,5 @@
 #pragma once
 
-#include <ozo/detail/pg_type.h>
 #include <ozo/detail/float.h>
 #include <ozo/core/strong_typedef.h>
 #include <ozo/core/nullable.h>
@@ -143,20 +142,35 @@ struct array;
 
 namespace detail {
 
-template <typename T, typename = std::void_t<>>
-struct get_type_traits { using type = void; };
+template <typename Traits, typename = std::void_t<>>
+struct is_type_traits_defined : std::false_type {};
 
 template <typename T>
-struct get_type_traits<T, std::void_t<typename definitions::type<T>::name>> {
-    using type = definitions::type<T>;
-};
+struct is_type_traits_defined<T, Require<
+    !std::is_void_v<typename T::name>
+>> : std::true_type {};
 
 template <typename T>
-struct get_type_traits<T, Require<Array<T>>> {
-    using type = definitions::array<unwrap_type<typename T::value_type>>;
-};
-
+inline auto get_type_traits(const T&) {
+    using type = unwrap_type<T>;
+    if constexpr (Array<type>) {
+        using value_type = unwrap_type<typename type::value_type>;
+        if constexpr (is_type_traits_defined<definitions::array<value_type>>::value) {
+            return definitions::array<value_type>{};
+        } else {
+            return;
+        }
+    } else {
+        if constexpr (is_type_traits_defined<definitions::type<type>>::value) {
+            return definitions::type<type>{};
+        } else {
+            return;
+        }
+    }
 }
+
+} // namespace detail
+
 /**
  * @brief Type traits template forward declaration.
  * @ingroup group-type_system-types
@@ -180,7 +194,7 @@ struct type_traits {
 #endif
 
 template <typename T>
-using type_traits = typename detail::get_type_traits<unwrap_type<T>>::type;
+using type_traits = decltype(detail::get_type_traits(std::declval<T>()));
 
 /**
  * @brief Condition indicates if type has corresponding type traits for PostgreSQL
@@ -304,18 +318,6 @@ constexpr auto type_name() noexcept {
 template <typename T>
 constexpr auto type_name(const T&) noexcept {return type_name<T>();}
 
-
-/**
- * @brief Namespace for PostgreSQL specific types
- */
-namespace pg {
-
-OZO_STRONG_TYPEDEF(std::string, name)
-OZO_STRONG_TYPEDEF(std::vector<char>, bytea)
-
-} // namespace pg
-
-
 namespace detail {
 
 template <typename Name, typename Oid = void, typename Size = dynamic_size>
@@ -333,7 +335,6 @@ using array_definition = type_definition<
 
 } // namespace detail
 } // namespace ozo
-
 
 #define OZO_PG_DEFINE_TYPE_(Type, Name, OidType, Size) \
     namespace ozo::definitions {\
@@ -360,13 +361,14 @@ using array_definition = type_definition<
     OZO_PG_DEFINE_TYPE_ARRAY_(Type, ArrayOidType)
 
 /**
- * @brief Helper macro to define type mapping
- * @ingroup group-type_system-mapping
+ * @brief [[DEPRECATED]] Helper macro to define type mapping
+ *
  * In general type mapping is provided via `ozo::definitions::type` and
  * `ozo::definitions::array` specialization.
  * To reduce the boilerplate code the macro exists.
  *
- * @note This macro can be called in the global namespace only
+ * @note This macro is deprecated, use #OZO_PG_BIND_TYPE instead.
+ * This macro should be called in the global namespace only.
  *
  * @param Type --- C++ type to be mapped to database type
  * @param Name --- string with name of database type
@@ -375,16 +377,7 @@ using array_definition = type_definition<
  * @param Size --- `bytes<N>` for fixed-size type (like integer, bigint and so on),
  * there N - size of the type in database, `dynamic_type` for dynamic size types (like `text`
  * `bytea` and so on)
- *
- * ### Example
- *
- * E.g. a definition of `uuid` type looks like this:
-@code
-OZO_PG_DEFINE_TYPE_AND_ARRAY(boost::uuids::uuid, "uuid", UUIDOID, 2951, bytes<16>)
-@endcode
-
-@sa OZO_PG_DEFINE_CUSTOM_TYPE
-
+ * @ingroup group-type_system-mapping
  */
 #ifdef OZO_DOCUMENTATION
 #define OZO_PG_DEFINE_TYPE_AND_ARRAY(Type, Name, Oid, ArrayOid, Size)
@@ -395,7 +388,7 @@ OZO_PG_DEFINE_TYPE_AND_ARRAY(boost::uuids::uuid, "uuid", UUIDOID, 2951, bytes<16
 
 /**
  * @brief Helper macro to define custom type mapping
- * @ingroup group-type_system-mapping
+ *
  * In general type mapping is provided via `ozo::definitions::type` and
  * `ozo::definitions::array` specialization.
  *
@@ -410,7 +403,7 @@ OZO_PG_DEFINE_TYPE_AND_ARRAY(boost::uuids::uuid, "uuid", UUIDOID, 2951, bytes<16
  * ### Example
  *
  * Definition of user defined composite type may look like this:
-@code
+ * @code
 BOOST_FUSION_DEFINE_STRUCT((smtp), message,
     (std::int64_t, id)
     (std::string, from)
@@ -422,9 +415,9 @@ BOOST_FUSION_DEFINE_STRUCT((smtp), message,
 //...
 
 OZO_PG_DEFINE_CUSTOM_TYPE(smtp::message, "code.message")
-@endcode
-
-@sa OZO_PG_DEFINE_TYPE_AND_ARRAY
+ * @endcode
+ * @sa OZO_PG_BIND_TYPE
+ * @ingroup group-type_system-mapping
  */
 #ifdef OZO_DOCUMENTATION
 #define OZO_PG_DEFINE_CUSTOM_TYPE(Type, Name [, Size])
@@ -438,28 +431,6 @@ OZO_PG_DEFINE_CUSTOM_TYPE(smtp::message, "code.message")
 #define OZO_PG_DEFINE_CUSTOM_TYPE(...)\
     BOOST_PP_OVERLOAD(OZO_PG_DEFINE_CUSTOM_TYPE_IMPL_,__VA_ARGS__)(__VA_ARGS__)
 #endif
-
-/**
- * @brief Bool type mapping
- * @ingroup group-type_system-mapping
- */
-OZO_PG_DEFINE_TYPE_AND_ARRAY(bool, "bool", BOOLOID, 1000, bytes<1>)
-OZO_PG_DEFINE_TYPE_AND_ARRAY(char, "char", CHAROID, 1002, bytes<1>)
-OZO_PG_DEFINE_TYPE_AND_ARRAY(ozo::pg::bytea, "bytea", BYTEAOID, 1001, dynamic_size)
-
-OZO_PG_DEFINE_TYPE_AND_ARRAY(int64_t, "int8", INT8OID, 1016, bytes<8>)
-OZO_PG_DEFINE_TYPE_AND_ARRAY(int32_t, "int4", INT4OID, INT4ARRAYOID, bytes<4>)
-OZO_PG_DEFINE_TYPE_AND_ARRAY(int16_t, "int2", INT2OID, INT2ARRAYOID, bytes<2>)
-
-OZO_PG_DEFINE_TYPE_AND_ARRAY(ozo::oid_t, "oid", OIDOID, OIDARRAYOID, bytes<4>)
-
-OZO_PG_DEFINE_TYPE_AND_ARRAY(double, "float8", FLOAT8OID, 1022, bytes<8>)
-OZO_PG_DEFINE_TYPE_AND_ARRAY(float, "float4", FLOAT4OID, FLOAT4ARRAYOID, bytes<4>)
-
-OZO_PG_DEFINE_TYPE_AND_ARRAY(std::string, "text", TEXTOID, TEXTARRAYOID, dynamic_size)
-OZO_PG_DEFINE_TYPE_AND_ARRAY(std::string_view, "text", TEXTOID, TEXTARRAYOID, dynamic_size)
-
-OZO_PG_DEFINE_TYPE_AND_ARRAY(ozo::pg::name, "name", NAMEOID, 1003, dynamic_size)
 
 namespace ozo {
 
@@ -546,7 +517,7 @@ struct custom_type;
 //...
 
 // Providing type information and corresponding database type
-OZO_PG_DEFINE_TYPE_AND_ARRAY(custom_type, "code.custom_type", null_oid, null_oid, dynamic_size)
+OZO_PG_DEFINE_CUSTOM_TYPE(custom_type, "code.custom_type")
 
 //...
 // Creating ConnectionSource for futher requests to a database
